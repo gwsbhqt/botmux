@@ -63,12 +63,23 @@ describe('monitor room local session set', () => {
 });
 
 describe('session terminal href', () => {
-  const local: SessionTerminalLocation = { protocol: 'http:', origin: 'http://localhost:8801', hostname: 'localhost' };
+  // The dashboard origin port is deliberately DIFFERENT from proxyPort. It used
+  // to be 8801 — the same as proxyPort — so a same-origin href and a raw
+  // `hostname:proxyPort` href rendered as the identical string and this suite
+  // stayed green while HTTP pages linked straight at the daemon proxy port.
+  const local: SessionTerminalLocation = { protocol: 'http:', origin: 'http://localhost:7891', hostname: 'localhost' };
   const platform: SessionTerminalLocation = { protocol: 'https:', origin: 'https://m-1.example.test', hostname: 'm-1.example.test' };
 
-  it('builds local direct and proxy terminal urls', () => {
+  it('routes proxied terminals through the same-origin front door on http pages too', () => {
+    // Never the daemon's proxy port: that path skips the front door's
+    // countersign/revocation check and truncates the response across a network.
+    const href = sessionTerminalHref({ sessionId: 'abc', webPort: 3001, proxyPort: 8801 }, local);
+    expect(href).toBe('http://localhost:7891/s/abc');
+    expect(href).not.toContain('8801');
+  });
+
+  it('falls back to the bare worker port only when there is no proxy', () => {
     expect(sessionTerminalHref({ sessionId: 'abc', webPort: 3001 }, local)).toBe('http://localhost:3001');
-    expect(sessionTerminalHref({ sessionId: 'abc', webPort: 3001, proxyPort: 8801 }, local)).toBe('http://localhost:8801/s/abc');
   });
 
   it('uses same-origin proxy urls on https platform pages', () => {

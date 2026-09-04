@@ -200,8 +200,18 @@ export function startTerminalProxy(opts: TerminalProxyOptions): Promise<Terminal
         });
         client.on('error', cleanup);
         upstream.on('close', () => {
-          // pipe() ends the client after a clean EOF. Let pending writes drain
-          // before closing it, or the HTTP response tail can be truncated.
+          // pipe() ends the client after a clean EOF, and that end() flushes
+          // whatever is still queued before the FIN. Destroying here instead
+          // would cut the socket mid-flush and DROP those bytes — over loopback
+          // the whole response is usually written in one go so it never shows,
+          // but across a network (higher RTT, a full send buffer) the tail is
+          // reliably lost: the terminal page arrives a few KB short, the script
+          // that opens the WebSocket is in the missing part, and the browser
+          // sits at 「connecting…」 with ERR_INCOMPLETE_CHUNKED_ENCODING while
+          // the worker logs no WS connection at all.
+          // So only force the socket down when the upstream did NOT reach a
+          // clean EOF — there pipe() will never end the client, and waiting on
+          // a flush that can no longer complete would hang the connection.
           if (!upstream.readableEnded) client.destroy();
         });
         client.on('close', () => upstream.destroy());
