@@ -3,11 +3,18 @@
  * method calls for each adapter in tmux vs non-tmux mode.
  *
  * Actual behavior (not the intended/ideal design):
- * - Claude Code (tmux): types content like a human via sendText, replacing
- *   each \n with a `\` + Enter pair (Claude Code's documented soft-newline
- *   idiom). Final Enter submits. Sidesteps tmux bracketed-paste mode, which
- *   was unreliable: Claude Code can toggle it off mid-session and turn pasted
- *   newlines into separate submits.
+ * - Claude Code (tmux), DEFAULT: one pasteText carrying the whole envelope,
+ *   then the submit key. Verified on claude 2.1.267 (2026-09-10) against both
+ *   tmux 3.7c and rmux 0.10.0 — including immediately after a slash command,
+ *   the case that originally motivated the typing path.
+ * - Claude Code (tmux), BOTMUX_CLAUDE_PASTE_INPUT=0: types content like a
+ *   human via sendText, replacing each \n with a `\` + Enter pair (Claude
+ *   Code's documented soft-newline idiom). Final Enter submits. This was the
+ *   default until the paste path was measured; it stays reachable because the
+ *   bracketed-paste and paste-burst bugs it works around were real on older
+ *   Claude Code builds. THIS FILE PINS THE SWITCH OFF (see below), so most
+ *   expectations here describe this branch; the paste branch has its own
+ *   describe block at the end.
  * - Claude Code (raw PTY): keeps the explicit \x1b[200~...\x1b[201~ wrapping
  *   since we control the markers directly there.
  * - CoCo (tmux): single pasteText with whole content + delayed Enter — tmux
@@ -104,6 +111,12 @@ import { codexHistoryPath } from '../src/services/codex-paths.js';
 // (equally scaled) confirm budget.
 process.env.BOTMUX_TIME_SCALE ??= '0.05';
 const TIME_SCALE = Number(process.env.BOTMUX_TIME_SCALE);
+
+// Pin the whole file to the per-line typing path (BOTMUX_CLAUDE_PASTE_INPUT=0)
+// so every existing claude-code expectation below keeps asserting THAT branch —
+// it is still live as the escape hatch for older Claude Code builds. The
+// default (paste) branch has its own describe block at the end of this file.
+process.env.BOTMUX_CLAUDE_PASTE_INPUT ??= '0';
 
 afterEach(() => {
   // Bun's `runAllTimersAsync` can leave fake timers installed when a test
@@ -1901,5 +1914,84 @@ describe('coco writeInput submission confirmation', () => {
     expect(recheck()).toBe(false);
     appendTraeHistory(MULTILINE, 'late-trae-session');
     expect(recheck()).toBe(true);
+  });
+});
+
+// =========================================================================
+// Claude Code: one-shot paste input (BOTMUX_CLAUDE_PASTE_INPUT, default on)
+// =========================================================================
+
+/**
+ * The rest of this file pins BOTMUX_CLAUDE_PASTE_INPUT=0 to keep asserting the
+ * per-line typing path. These cases cover the DEFAULT (unset) behaviour: one
+ * pasteText carrying the whole envelope, then the ordinary submit key — no
+ * chunking, no `\` soft-newline pairs.
+ *
+ * Measured 2026-09-10 on claude 2.1.267 (tmux 3.7c + rmux 0.10.0): a 174KB /
+ * 2000-line paste lands in 8ms and submits as ONE message, whereas the typing
+ * path needs 1854 chunks x 30ms. The transcript records the verbatim text (not
+ * a `[Pasted text #N]` placeholder), so the fingerprint-based submit
+ * confirmation below is unaffected.
+ */
+describe('claude-code writeInput: one-shot paste (switch default on)', () => {
+  const withPasteInput = async (value: string | undefined, run: () => Promise<void>) => {
+    const prev = process.env.BOTMUX_CLAUDE_PASTE_INPUT;
+    if (value === undefined) delete process.env.BOTMUX_CLAUDE_PASTE_INPUT;
+    else process.env.BOTMUX_CLAUDE_PASTE_INPUT = value;
+    try { await run(); } finally {
+      if (prev === undefined) delete process.env.BOTMUX_CLAUDE_PASTE_INPUT;
+      else process.env.BOTMUX_CLAUDE_PASTE_INPUT = prev;
+    }
+  };
+
+  it('unset env: single pasteText with the whole content, no chunked sendText', async () => {
+    await withPasteInput(undefined, async () => {
+      const pty = makeTmuxPty();
+      await createClaudeCodeAdapter('/bin/claude').writeInput(pty, MULTILINE);
+      expect(pty.pasteText).toHaveBeenCalledTimes(1);
+      expect(pty.pasteText).toHaveBeenCalledWith(MULTILINE);
+      expect(pty.sendText).not.toHaveBeenCalled();
+      expect(pty.sendSpecialKeys).toHaveBeenCalledWith('Enter');
+    });
+  });
+
+  it('embedded newlines ride inside the paste — no `\\` soft-newline pairs', async () => {
+    await withPasteInput(undefined, async () => {
+      const pty = makeTmuxPty();
+      await createClaudeCodeAdapter('/bin/claude').writeInput(pty, MULTILINE);
+      expect(pty.sendText).not.toHaveBeenCalledWith('\\');
+      const enterCalls = pty.sendSpecialKeys.mock.calls.filter(c => c[0] === 'Enter');
+      expect(enterCalls).toHaveLength(1);
+    });
+  });
+
+  it('a long line is pasted whole, not split into UTF-8 chunks', async () => {
+    await withPasteInput(undefined, async () => {
+      const long = '中文内容混排 abcdefghijklmnopqrstuvwxyz0123456789 '.repeat(60);
+      const pty = makeTmuxPty();
+      await createClaudeCodeAdapter('/bin/claude').writeInput(pty, long);
+      expect(pty.pasteText).toHaveBeenCalledWith(long);
+      expect(pty.sendText).not.toHaveBeenCalled();
+    });
+  });
+
+  it.each(['0', 'off', 'false', 'no', 'OFF'])(
+    'BOTMUX_CLAUDE_PASTE_INPUT=%s falls back to the per-line typing path',
+    async (value) => {
+      await withPasteInput(value, async () => {
+        const pty = makeTmuxPty();
+        await createClaudeCodeAdapter('/bin/claude').writeInput(pty, MULTILINE);
+        expect(pty.pasteText).not.toHaveBeenCalled();
+        expect(pty.sendText).toHaveBeenCalled();
+      });
+    },
+  );
+
+  it('raw PTY (no pasteText) still uses the explicit bracketed-paste wrap', async () => {
+    await withPasteInput(undefined, async () => {
+      const pty = makeRawPty();
+      await createClaudeCodeAdapter('/bin/claude').writeInput(pty, MULTILINE);
+      expect(pty.write).toHaveBeenCalledWith(`\x1b[200~${MULTILINE}\x1b[201~`);
+    });
   });
 });

@@ -55,6 +55,31 @@ export const DEFAULT_CLAUDE_DATA_DIR = join(homedir(), '.claude');
  *  are throttled, so split every non-empty line into small, paced chunks. */
 export const CLAUDE_INPUT_CHUNK_BYTES = 96;
 
+/**
+ * 一次性粘贴投递（`BOTMUX_CLAUDE_PASTE_INPUT`，默认 **on**）。
+ *
+ * 逐块打字（96 字节 / 30ms 节流）原本是为了绕开两个 Claude Code 的老毛病：
+ *   ① 复用器的 `paste-buffer -p` 只在应用**当前处于** bracketed-paste 模式时才插
+ *      标记，而 Claude Code 会在跑完 slash 命令后把该模式关掉 —— 标记被丢，内嵌
+ *      换行退化成 Enter，一条消息被切成多次提交；
+ *   ② paste-burst 启发式：输入过快会被当成粘贴，之后 `\` + Enter 软换行失效。
+ *
+ * 2026-09-10 在 claude 2.1.267 上实测，两条都**不再复现**（tmux 3.7c 与 rmux 0.10.0
+ * 各测一遍，含 slash 命令之后立即粘贴）：内容完整、提交为单条、jsonl 落的是**完整
+ * 原文**而非 `[Pasted text #N]` 折叠引用（所以下面的 fingerprint 确认逻辑照常工作）。
+ * 耗时与体积几乎无关：1.7KB/8.7KB/43KB/174KB 分别 6/5/6/8ms，而逐块路径同样内容
+ * 实测 p50 3.9s，174KB 更是要 1854 块 × 30ms ≈ 56s。
+ *
+ * 保留开关而不是直接删掉旧路径：那两个毛病很可能是**旧版 Claude Code 真实存在、后
+ * 来被官方修掉**的，一旦降级 CLI 就会回归。届时 `BOTMUX_CLAUDE_PASTE_INPUT=0`
+ * 即可逐字回到历史行为。
+ */
+export function claudePasteInputEnabled(): boolean {
+  const raw = process.env.BOTMUX_CLAUDE_PASTE_INPUT;
+  if (raw === undefined) return true;
+  return !['0', 'off', 'false', 'no'].includes(raw.trim().toLowerCase());
+}
+
 /** Split without cutting a Unicode code point or exceeding the byte budget. */
 export function chunkTextByUtf8Bytes(
   text: string,
@@ -1018,7 +1043,21 @@ export function createClaudeFamilyAdapter(variant: ClaudeFamilyVariant, rawBin: 
         return buildResult(false, keybindings.failureReason ?? UNSUPPORTED_SUBMIT_KEY_FAILURE);
       }
 
-      if (pty.sendText && pty.sendSpecialKeys) {
+      if (claudePasteInputEnabled() && pty.pasteText) {
+        // Fast path: hand the whole envelope over in ONE bracketed paste
+        // (`load-buffer` + `paste-buffer -d -p` on tmux; the direct
+        // \e[200~…\e[201~ byte pair on the others). Every backend that
+        // implements sendText also implements pasteText, so this covers
+        // tmux / tmux-pipe / zellij / zellij-observe / herdr / zmx; pty /
+        // mojo / riff fall through to the raw-write branch below as before.
+        //
+        // No soft-newline rewriting here: the paste markers already tell Ink
+        // the embedded newlines are content, not submits — which is exactly
+        // what the per-line `\` + Enter dance was emulating one keystroke at
+        // a time. See claudePasteInputEnabled() for the measurements and for
+        // the escape hatch when running an older Claude Code.
+        pty.pasteText(content);
+      } else if (pty.sendText && pty.sendSpecialKeys) {
         const lines = content.split('\n');
         for (let i = 0; i < lines.length; i++) {
           if (lines[i].length > 0) {
