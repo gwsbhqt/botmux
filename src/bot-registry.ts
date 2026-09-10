@@ -3417,6 +3417,11 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
     const summaryRange = normalizeSummaryRange(entry.summaryRange ?? entry.summary);
     const summaryMemory = entry.summaryMemory === true ? true : undefined;
     const summaryMemoryPath = normalizeNonEmptyString(entry.summaryMemoryPath);
+    // 只认 'auto'，其余（含缺省/'off'/脏值）一律 undefined = 内联，与
+    // resolveEnvelopeInjectionMode 的判据 `!== 'auto'` 同侧，坏值不会静默启用 hook 注入。
+    // 缺了这一行时，applyConfigField 写进 bots.json 的 'auto' 只活在内存里，daemon 一
+    // 重启就被这里读不出来 —— 该开关自始至终无法持久生效。
+    const envelopeInjection = entry.envelopeInjection === 'auto' ? 'auto' as const : undefined;
     const contentTriggers = normalizeContentTriggers(entry.contentTriggers, i);
     const messageListeners = normalizeMessageListeners(entry.messageListeners, i);
     const commandTriggers = normalizeCommandTriggers(entry.commandTriggers);
@@ -3712,6 +3717,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       summaryRange,
       summaryMemory,
       summaryMemoryPath,
+      envelopeInjection,
       contentTriggers,
       voice,
       pricing,

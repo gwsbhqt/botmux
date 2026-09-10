@@ -303,6 +303,28 @@ describe('bot-registry grant additions', () => {
     expect(cfgs[4].summaryMemoryPath).toBeUndefined();
   });
 
+  it('parses envelopeInjection so the setting survives a daemon restart', () => {
+    // Regression: the field had a type declaration but no parse step, so
+    // applyConfigField's write to bots.json only ever lived in memory — every
+    // restart silently reverted the bot to inline envelopes.
+    const cfgs = parseBotConfigsFromText(JSON.stringify([
+      { larkAppId: 'ei1', larkAppSecret: 's', envelopeInjection: 'auto' },
+      { larkAppId: 'ei2', larkAppSecret: 's', envelopeInjection: 'off' },
+      { larkAppId: 'ei3', larkAppSecret: 's' },
+      { larkAppId: 'ei4', larkAppSecret: 's', envelopeInjection: 'AUTO' },
+      { larkAppId: 'ei5', larkAppSecret: 's', envelopeInjection: true },
+    ]));
+
+    expect(cfgs[0].envelopeInjection).toBe('auto');
+    // Everything that is not exactly 'auto' stays undefined (= inline), matching
+    // resolveEnvelopeInjectionMode's `!== 'auto'` test — a dirty value must never
+    // silently turn hook injection on.
+    expect(cfgs[1].envelopeInjection).toBeUndefined();
+    expect(cfgs[2].envelopeInjection).toBeUndefined();
+    expect(cfgs[3].envelopeInjection).toBeUndefined();
+    expect(cfgs[4].envelopeInjection).toBeUndefined();
+  });
+
   it('parses legacy contentTriggers and preserves explicit unlimited history settings', () => {
     const cfgs = parseBotConfigsFromText(JSON.stringify([{
       larkAppId: 'ct1',
