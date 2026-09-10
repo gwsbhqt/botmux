@@ -555,6 +555,179 @@ describe('installHook — claude-settings', () => {
     expect(askGroups[0].hooks.some((e: any) => e.command === hookCommand)).toBe(true);
   });
 
+  // ─── 用户手改过的 hook 命令：有效则保留，失效才覆盖 ─────────────────────
+  //
+  // 规范命令由 renderShellCommand 生成，写死 process.execPath 与 cli.js 的绝对路径
+  // （含用户名与解释器版本目录）。把 settings.json 纳入 dotfiles 管理的用户会改成
+  // `$HOME` 相对 + `command -v node` 现场解析；在此之前每次 daemon 重启都会打回原形。
+
+  /** 造一个真实存在的 cli.js，让「目标存在」判据可满足。 */
+  function makeLiveCli(): string {
+    const dir = join(tmpDir, 'botmux', 'dist');
+    mkdirSync(dir, { recursive: true });
+    const cliPath = join(dir, 'cli.js');
+    writeFileSync(cliPath, '// stub\n');
+    return cliPath;
+  }
+
+  const portable = (cli: string, sub: string) =>
+    `[ ! -f "${cli}" ] || ! command -v node >/dev/null 2>&1 || exec node "${cli}" ${sub}`;
+
+  const CANON = {
+    ask: '/abs/node /abs/dist/cli.js hook claude-code',
+    ready: '/abs/node /abs/dist/cli.js session-ready',
+    prompt: '/abs/node /abs/dist/cli.js user-prompt-hook',
+  };
+
+  function writeSettingsWith(ask: string, ready: string, prompt: string): void {
+    mkdirSync(join(tmpDir, '.claude'), { recursive: true });
+    writeFileSync(configPath, `${JSON.stringify({
+      hooks: {
+        PreToolUse: [{ matcher: 'AskUserQuestion', hooks: [{ type: 'command', command: ask, timeout: 86400 }] }],
+        SessionStart: [{ hooks: [{ type: 'command', command: ready }] }],
+        UserPromptSubmit: [{ hooks: [{ type: 'command', command: prompt, timeout: 10 }] }],
+      },
+    }, null, 2)}\n`);
+  }
+
+  it('(j) 手改过且仍然有效的 hook 被原样保留，一个字节都不动', () => {
+    const cli = makeLiveCli();
+    writeSettingsWith(portable(cli, 'hook claude-code'), portable(cli, 'session-ready'), portable(cli, 'user-prompt-hook'));
+    const before = readFileSync(configPath, 'utf-8');
+
+    installHook('claude-code', {
+      configPath,
+      format: 'claude-settings',
+      sessionStartCommand: CANON.ready,
+      userPromptSubmitCommand: CANON.prompt,
+    }, CANON.ask);
+
+    // 不仅命令没被替换，group 顺序与用户加的存在性守卫也都保住了。
+    expect(readFileSync(configPath, 'utf-8')).toBe(before);
+  });
+
+  it('(j2) 手改过但目标路径已失效时照常覆盖（换机器 / 换安装方式后自愈）', () => {
+    const gone = join(tmpDir, 'gone', 'dist', 'cli.js'); // 故意不创建
+    writeSettingsWith(portable(gone, 'hook claude-code'), portable(gone, 'session-ready'), portable(gone, 'user-prompt-hook'));
+
+    installHook('claude-code', {
+      configPath,
+      format: 'claude-settings',
+      sessionStartCommand: CANON.ready,
+      userPromptSubmitCommand: CANON.prompt,
+    }, CANON.ask);
+
+    const settings = JSON.parse(readFileSync(configPath, 'utf-8'));
+    const commandsOf = (event: string): string[] =>
+      (settings.hooks?.[event] ?? []).flatMap((g: any) => (g.hooks ?? []).map((e: any) => e.command));
+    // 失效的那条被清掉，换成规范命令——不叠加。
+    expect(commandsOf('PreToolUse')).toEqual([CANON.ask]);
+    expect(commandsOf('SessionStart')).toEqual([CANON.ready]);
+    expect(commandsOf('UserPromptSubmit')).toEqual([CANON.prompt]);
+  });
+
+  it('(j3) 保留判定按事件独立：有效的留下，同一份配置里失效的仍被修好', () => {
+    const cli = makeLiveCli();
+    const gone = join(tmpDir, 'gone', 'dist', 'cli.js');
+    writeSettingsWith(portable(cli, 'hook claude-code'), portable(gone, 'session-ready'), portable(cli, 'user-prompt-hook'));
+
+    installHook('claude-code', {
+      configPath,
+      format: 'claude-settings',
+      sessionStartCommand: CANON.ready,
+      userPromptSubmitCommand: CANON.prompt,
+    }, CANON.ask);
+
+    const settings = JSON.parse(readFileSync(configPath, 'utf-8'));
+    const commandsOf = (event: string): string[] =>
+      (settings.hooks?.[event] ?? []).flatMap((g: any) => (g.hooks ?? []).map((e: any) => e.command));
+    expect(commandsOf('PreToolUse')).toEqual([portable(cli, 'hook claude-code')]);
+    expect(commandsOf('UserPromptSubmit')).toEqual([portable(cli, 'user-prompt-hook')]);
+    expect(commandsOf('SessionStart')).toEqual([CANON.ready]);
+  });
+
+  it('(j4) 我们自己写的规范命令不算「自定义」，路径变化时仍按老规则去重替换', () => {
+    // 与 (c3) 同一场景，这里断言保留逻辑没有把它误判成用户改动而卡住升级。
+    const cli = makeLiveCli();
+    writeSettingsWith(`node "${cli}" hook claude-code`, `node "${cli}" session-ready`, `node "${cli}" user-prompt-hook`);
+
+    installHook('claude-code', {
+      configPath,
+      format: 'claude-settings',
+      sessionStartCommand: CANON.ready,
+      userPromptSubmitCommand: CANON.prompt,
+    }, CANON.ask);
+
+    const settings = JSON.parse(readFileSync(configPath, 'utf-8'));
+    const readyCommands = (settings.hooks?.SessionStart ?? [])
+      .flatMap((g: any) => (g.hooks ?? []).map((e: any) => e.command));
+    // `node "<live cli.js>" session-ready` 是一条**有效且非规范**的命令，按判据属于
+    // 用户改动 —— 保留。这正是设计意图：botmux 只在自己那份原样命令上做替换。
+    expect(readyCommands).toEqual([`node "${cli}" session-ready`]);
+  });
+
+  // ↓ 保留逻辑的安全阀：hook 契约一旦变化，用户那条旧命令必须被覆盖，
+  //   否则人会被静默卡在一个功能残缺的旧版上。
+
+  it('(j5) 子命令新增参数后，用户的旧命令不再被保留（防止功能静默残缺）', () => {
+    const cli = makeLiveCli();
+    // 用户手改的是**旧契约**：… session-ready（无参数）
+    writeSettingsWith(portable(cli, 'hook claude-code'), portable(cli, 'session-ready'), portable(cli, 'user-prompt-hook'));
+
+    // botmux 升级后给 session-ready 加了参数
+    installHook('claude-code', {
+      configPath,
+      format: 'claude-settings',
+      sessionStartCommand: '/abs/node /abs/dist/cli.js session-ready --format=json',
+      userPromptSubmitCommand: CANON.prompt,
+    }, CANON.ask);
+
+    const settings = JSON.parse(readFileSync(configPath, 'utf-8'));
+    const readyCommands = (settings.hooks?.SessionStart ?? [])
+      .flatMap((g: any) => (g.hooks ?? []).map((e: any) => e.command));
+    // 签名 'session-ready' ≠ 'session-ready --format=json' → 覆盖，且不叠加
+    expect(readyCommands).toEqual(['/abs/node /abs/dist/cli.js session-ready --format=json']);
+    // 契约没变的另外两个事件仍然保留用户的写法
+    const promptCommands = (settings.hooks?.UserPromptSubmit ?? [])
+      .flatMap((g: any) => (g.hooks ?? []).map((e: any) => e.command));
+    expect(promptCommands).toEqual([portable(cli, 'user-prompt-hook')]);
+  });
+
+  it('(j6) 子命令改名后，用户的旧命令不再被保留', () => {
+    const cli = makeLiveCli();
+    writeSettingsWith(portable(cli, 'hook claude-code'), portable(cli, 'session-ready'), portable(cli, 'user-prompt-hook'));
+
+    installHook('claude-code', {
+      configPath,
+      format: 'claude-settings',
+      sessionStartCommand: '/abs/node /abs/dist/cli.js session-ready-v2',
+      userPromptSubmitCommand: CANON.prompt,
+    }, CANON.ask);
+
+    const settings = JSON.parse(readFileSync(configPath, 'utf-8'));
+    const readyCommands = (settings.hooks?.SessionStart ?? [])
+      .flatMap((g: any) => (g.hooks ?? []).map((e: any) => e.command));
+    expect(readyCommands).toContain('/abs/node /abs/dist/cli.js session-ready-v2');
+  });
+
+  it('(j7) cliId 变化时 ask hook 的用户改动不再被保留', () => {
+    const cli = makeLiveCli();
+    writeSettingsWith(portable(cli, 'hook claude-code'), portable(cli, 'session-ready'), portable(cli, 'user-prompt-hook'));
+
+    installHook('seed', {
+      configPath,
+      format: 'claude-settings',
+      sessionStartCommand: CANON.ready,
+      userPromptSubmitCommand: CANON.prompt,
+    }, '/abs/node /abs/dist/cli.js hook seed');
+
+    const settings = JSON.parse(readFileSync(configPath, 'utf-8'));
+    const askCommands = (settings.hooks?.PreToolUse ?? [])
+      .flatMap((g: any) => (g.hooks ?? []).map((e: any) => e.command));
+    // 'hook claude-code' ≠ 'hook seed' → 写入新 cliId 的那条
+    expect(askCommands).toContain('/abs/node /abs/dist/cli.js hook seed');
+  });
+
   it('(d) 迁移旧 PermissionRequest botmux entry 到 PreToolUse', () => {
     const existing = {
       hooks: {
