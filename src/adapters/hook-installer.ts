@@ -147,6 +147,126 @@ function isBotmuxHookCommand(command: string, suffix: string): boolean {
     || /^botmux-windows-(?:x64|arm64)(?:\.exe)?$/.test(basename);
 }
 
+/** hook 命令里可能出现的 botmux 调用目标名（与 isBotmuxHookCommand 同一份白名单）。 */
+const BOTMUX_HOOK_TARGET_BASENAMES = new Set(['cli.js', 'botmux', 'botmux.exe']);
+
+/** 展开 hook 命令里的 `~` / `$HOME` / `${HOME}`。
+ *  只认 HOME：它是唯一一个「装 hook 的进程与跑 hook 的进程必定同值」的变量，
+ *  其余 env（PATH 之外的自定义变量）在安装期无从求值，展开了反而会造出假路径。 */
+function expandHomeTokens(raw: string): string {
+  return expandHome(raw.replace(/\$\{HOME\}|\$HOME\b/g, homedir()));
+}
+
+/**
+ * 这条 hook 命令引用的 botmux 目标（`cli.js` / 打包二进制）在本机是否**真实存在**。
+ *
+ * 用途见 hasLiveCustomBotmuxHook：区分「用户手改过、但仍然跑得起来」与「指向已消失
+ * 的旧路径」。命令可能是任意 shell 片段（守卫 + `exec` + 引号），所以不做解析，只把
+ * 所有引号包裹或空白分隔的 token 拿出来逐个试——命中一个存在的即可。
+ */
+function botmuxHookTargetResolves(command: string): boolean {
+  const tokens = [
+    ...Array.from(command.matchAll(/"([^"]+)"|'([^']+)'/g), (m) => m[1] ?? m[2]),
+    ...command.split(/\s+/),
+  ];
+  for (const token of tokens) {
+    const cleaned = token.replace(/^["']+|["']+$/g, '');
+    if (!cleaned) continue;
+    const slash = Math.max(cleaned.lastIndexOf('/'), cleaned.lastIndexOf('\\'));
+    if (!BOTMUX_HOOK_TARGET_BASENAMES.has(cleaned.slice(slash + 1))) continue;
+    try {
+      if (existsSync(expandHomeTokens(cleaned))) return true;
+    } catch { /* 无法判定的路径按不存在处理 */ }
+  }
+  return false;
+}
+
+/** 把命令切成 token，识别成对引号，使含空格的路径不被拆开。 */
+function tokenizeShellish(command: string): string[] {
+  return Array.from(command.matchAll(/"[^"]*"|'[^']*'|\S+/g), (m) => m[0]);
+}
+
+/** 去掉 token 外面包着的引号。 */
+function unquote(token: string): string {
+  return token.replace(/^["']+|["']+$/g, '');
+}
+
+/**
+ * 抽出一条 botmux hook 命令的**契约签名**——调用目标（`cli.js` / 打包二进制）之后
+ * 的全部参数，逐字保留。
+ *
+ * 解释器路径、安装路径、`$HOME` 与绝对路径之别、外层守卫（`[ ! -f … ] || exec …`）
+ * 统统落在目标之前，因而全部被丢弃；剩下的正是「这条 hook 要 botmux 干什么」：
+ * `session-ready` / `user-prompt-hook` / `hook <cliId>`，连同将来可能新增的参数。
+ *
+ * 这是「保留用户改动」的安全阀。只按子命令**后缀**匹配是不够的：那样
+ * `… session-ready` 会与未来的 `… session-ready --format=json` 判为同一条，于是用户
+ * 那份旧命令被永久保留，hook 契约升级后功能静默残缺。改用整段签名逐字比对后，
+ * 改名、加参数、换 cliId 中的任何一种都会让签名不等，立刻回到覆盖路径。
+ *
+ * 取**最后一个**目标 token：用户的守卫写法里 `cli.js` 会出现两次（`[ ! -f "…cli.js" ]`
+ * 与 `exec node "…cli.js"`），只有后一个才真正带着子命令。
+ */
+function botmuxHookContractSignature(command: string): string | undefined {
+  const tokens = tokenizeShellish(command);
+  let lastTargetIdx = -1;
+  for (let i = 0; i < tokens.length; i++) {
+    const bare = unquote(tokens[i]);
+    const slash = Math.max(bare.lastIndexOf('/'), bare.lastIndexOf('\\'));
+    if (BOTMUX_HOOK_TARGET_BASENAMES.has(bare.slice(slash + 1))) lastTargetIdx = i;
+  }
+  if (lastTargetIdx === -1) return undefined;
+  const rest = tokens.slice(lastTargetIdx + 1).map(unquote).filter((t) => t.length > 0);
+  return rest.length > 0 ? rest.join(' ') : undefined;
+}
+
+/**
+ * 现有配置里是否已有一条「用户改造过、且当前仍然有效」的 botmux hook。
+ *
+ * 背景：安装逻辑一直是「识别 → 全删 → 追加规范写法」，规范写法由 renderShellCommand
+ * 生成，写死 `process.execPath` 与 `__dirname` 推出的 cli.js **绝对路径**（含用户名与
+ * 解释器版本目录）。于是把配置纳入 dotfiles 管理的用户每改一次可移植写法（`$HOME`
+ * 相对路径 + `command -v node` 现场解析），下一次 daemon 重启就被打回原形；连他们额外
+ * 加的存在性守卫也一并抹掉，且 group 顺序被重排，diff 每次都脏。
+ *
+ * 三条判据缺一不可：
+ *   1. **契约签名与本版逐字相同**（botmuxHookContractSignature）——保证保留下来的那条
+ *      在功能上就是我们这一版想要的。hook 契约日后改名 / 加参数 / 换 cliId，签名立刻
+ *      不等，自动回到覆盖路径，用户不会被静默卡在功能残缺的旧命令上。
+ *   2. **命令与我们会写的那串不同**——只对**人为改动**让路；我们自己写的那份仍按老
+ *      规则幂等替换（路径漂移时照常更新）。
+ *   3. **引用的目标确实存在**——保住自愈能力：换机器、换安装方式（npm global ↔ 源码
+ *      checkout ↔ 单文件二进制）后旧路径失效时照常覆盖。
+ *
+ * 已知边界：`timeout` 等 entry 元数据不参与签名。用户改过命令的事件上，我们也不会去
+ * 改它的 timeout —— 既然这份配置由他自己管，超时阈值也交给他；真要调整由本函数外的
+ * 覆盖路径（签名变化时）一并带上。
+ */
+function hasLiveCustomBotmuxHook(
+  groups: readonly ClaudeHookGroup[] | undefined,
+  canonicalCommand: string,
+): boolean {
+  if (!Array.isArray(groups)) return false;
+  const canonicalSignature = botmuxHookContractSignature(canonicalCommand);
+  // 连我们自己要写的命令都抽不出签名（形态异常）时不敢保留，一律走覆盖。
+  if (!canonicalSignature) return false;
+  return (groups as readonly ClaudeHookGroup[]).some((group) => {
+    // settings.json 是用户可手编的，形状不可信：逐层 Array.isArray 兜脏数据
+    // （与 isBotmuxReadyHookGroup 同一防御风格）。
+    const entries = group?.hooks;
+    if (!Array.isArray(entries)) return false;
+    return (entries as readonly ClaudeHookEntry[]).some(
+      (e) =>
+        !!e &&
+        e.type === 'command' &&
+        typeof e.command === 'string' &&
+        e.command !== canonicalCommand &&
+        botmuxHookContractSignature(e.command) === canonicalSignature &&
+        botmuxHookTargetResolves(e.command),
+    );
+  });
+}
+
 /**
  * 判断某个 hook group 是否是 botmux ask hook（用于幂等替换）。
  *
@@ -387,32 +507,55 @@ function installClaudeSettings(
   }
   const existingHooks = settings.hooks ?? {};
 
-  // 构造 botmux PreToolUse hook group（只拦截 AskUserQuestion）
-  const newEntry: ClaudeHookEntry = { type: 'command', command: hookCommand, timeout: 86400 };
-  const newGroup: ClaudeHookGroup = { matcher: 'AskUserQuestion', hooks: [newEntry] };
+  // 每个事件先看有没有「用户改造过且仍然有效」的同名 botmux hook —— 有就整段不碰
+  // （既不删也不追加），把手改的可移植写法原样留住。判据与自愈边界见
+  // hasLiveCustomBotmuxHook。
+  const preserved: string[] = [];
 
-  // 过滤掉旧的 botmux ask hook group（幂等 + 从 PermissionRequest 迁移到 PreToolUse）
-  removeBotmuxAskHookGroups(existingHooks, 'PermissionRequest', hookCommand);
-  removeBotmuxAskHookGroups(existingHooks, 'PreToolUse', hookCommand);
-  existingHooks['PreToolUse'] = [...(existingHooks['PreToolUse'] ?? []), newGroup];
+  // 构造 botmux PreToolUse hook group（只拦截 AskUserQuestion）
+  const askCustomized = hasLiveCustomBotmuxHook(existingHooks['PreToolUse'], hookCommand)
+    || hasLiveCustomBotmuxHook(existingHooks['PermissionRequest'], hookCommand);
+  if (askCustomized) {
+    preserved.push('PreToolUse');
+  } else {
+    const newEntry: ClaudeHookEntry = { type: 'command', command: hookCommand, timeout: 86400 };
+    const newGroup: ClaudeHookGroup = { matcher: 'AskUserQuestion', hooks: [newEntry] };
+
+    // 过滤掉旧的 botmux ask hook group（幂等 + 从 PermissionRequest 迁移到 PreToolUse）
+    removeBotmuxAskHookGroups(existingHooks, 'PermissionRequest', hookCommand);
+    removeBotmuxAskHookGroups(existingHooks, 'PreToolUse', hookCommand);
+    existingHooks['PreToolUse'] = [...(existingHooks['PreToolUse'] ?? []), newGroup];
+  }
 
   // SessionStart 就绪 hook（幂等替换旧的 botmux 条目）
   if (sessionStartCommand) {
-    removeBotmuxReadyHookGroups(existingHooks, 'SessionStart');
-    existingHooks['SessionStart'] = [
-      ...(existingHooks['SessionStart'] ?? []),
-      { hooks: [{ type: 'command', command: sessionStartCommand }] },
-    ];
+    if (hasLiveCustomBotmuxHook(existingHooks['SessionStart'], sessionStartCommand)) {
+      preserved.push('SessionStart');
+    } else {
+      removeBotmuxReadyHookGroups(existingHooks, 'SessionStart');
+      existingHooks['SessionStart'] = [
+        ...(existingHooks['SessionStart'] ?? []),
+        { hooks: [{ type: 'command', command: sessionStartCommand }] },
+      ];
+    }
   }
 
   // UserPromptSubmit per-turn 上下文 hook（#794，幂等替换旧的 botmux 条目）。
   // timeout 10s：hook 本身是纯文件读，10s 足够；防任何意外挂起。
   if (userPromptSubmitCommand) {
-    removeBotmuxPromptHookGroups(existingHooks, 'UserPromptSubmit');
-    existingHooks['UserPromptSubmit'] = [
-      ...(existingHooks['UserPromptSubmit'] ?? []),
-      { hooks: [{ type: 'command', command: userPromptSubmitCommand, timeout: 10 }] },
-    ];
+    if (hasLiveCustomBotmuxHook(existingHooks['UserPromptSubmit'], userPromptSubmitCommand)) {
+      preserved.push('UserPromptSubmit');
+    } else {
+      removeBotmuxPromptHookGroups(existingHooks, 'UserPromptSubmit');
+      existingHooks['UserPromptSubmit'] = [
+        ...(existingHooks['UserPromptSubmit'] ?? []),
+        { hooks: [{ type: 'command', command: userPromptSubmitCommand, timeout: 10 }] },
+      ];
+    }
+  }
+
+  if (preserved.length > 0) {
+    logger.info(`[hook] 保留用户自定义的 Claude hook（${preserved.join(' / ')}）→ ${configPath}`);
   }
 
   settings.hooks = existingHooks;
