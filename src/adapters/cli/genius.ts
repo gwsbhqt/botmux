@@ -103,7 +103,7 @@ export function createGeniusAdapter(pathOverride?: string): CliAdapter {
       }
     },
 
-    buildArgs({ sessionId, resume, resumeSessionId, botName, botOpenId, larkAppId, locale, model, disableCliBypass, workingDir, skillPluginDir, noTransport, triggerUserAuth, larkToolAppId }) {
+    buildArgs({ sessionId, resume, resumeSessionId, botName, botOpenId, larkAppId, locale, model, disableCliBypass, workingDir, skillPluginDir, noTransport, triggerUserAuth, brandLabel, larkToolAppId }) {
       const args: string[] = [];
       if (workingDir) args.push('--add-dir', workingDir);
       if (resume) {
@@ -139,6 +139,7 @@ export function createGeniusAdapter(pathOverride?: string): CliAdapter {
         noTransport,
         triggerUserAuth,
         larkToolAppId,
+        brandLabel,
         builtinSkillBlock: builtinSkillBlockForInjectsSessionContext(larkAppId, locale, {
           asksViaHook: false,
           whiteboardEnabled: whiteboardEnabled(),

@@ -11,8 +11,8 @@ import { readAllowedUsersResolveCache } from '../utils/allowed-users-cache.js';
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, statSync, unlinkSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
 import { logger } from '../utils/logger.js';
 import type { DurableLarkOutboxTarget } from '../services/durable-lark-outbox.js';
 import { cliAuthBind, loadDashboardSecret, verifyHmac } from '../dashboard/auth.js';
@@ -1041,12 +1041,12 @@ export function routeHasNarrowUntrustedAuth(method: string, pathname: string): b
   // aperture the outer 401 makes that fence unreachable and the channel is
   // silently dead in every isolated (bwrap / read-isolated) session.
   if (method === 'POST' && pathname === '/api/turn-idle') return true;
-  // botmux slash / botmux role switch（角色切换）/ botmux delete（关闭自身）：合法调用方
+  // botmux slash / botmux role switch（角色切换）/ botmux delete（关闭自身）/ botmux dir set：合法调用方
   // 是会话内的 CLI 自身，沙箱 / 读隔离下读不到 host secret。handler 内验证
   // 该会话的 rotating per-turn
   // capability 并绑定到 URL 里的 sessionId（同 /api/asks 姿势）——capability 只
   // 证明「我是这个会话当前这一轮的 CLI」，选不了别的会话。
-  if (method === 'POST' && /^\/api\/sessions\/[^/]+\/(?:slash|cd|close|preview|chat-rename|rename|project|project-dispatch-policy|continuation|durable-send|turn-delivery|auth-request|auth-status)$/.test(pathname)) return true;
+  if (method === 'POST' && /^\/api\/sessions\/[^/]+\/(?:slash|cd|close|preview|chat-rename|rename|project|project-dispatch-policy|continuation|durable-send|turn-delivery|auth-request|auth-status|footer-dir)$/.test(pathname)) return true;
   // UserPromptSubmit hook 的 envelope claim：沙箱内 hook 读不到 host secret，
   // 走 body 里的 per-turn capability；handler 内 sessionCliIpcAuth 绑定到 URL 的
   // sessionId + 按 managedTurnOrigin.turnId 权威取（同 /close 姿势）。
@@ -4385,6 +4385,26 @@ ipcRoute('POST', '/api/sessions/:sessionId/rename', async (req, res, params) => 
     titleSource: updated.source,
     agentSync: agentSync.status,
   });
+});
+
+// 卡片签名目录：`botmux dir set` 记完 MR/Meego 链接后上报 agent 实际所在的仓库根，页脚的
+// {repo}/{branch}/{mrUrl}/… 改读这里（常是 agent 新建的 worktree，不是会话工作目录）。纯展示，
+// 只要求是存在的绝对目录；不影响 spawn cwd、沙箱或任何权限判定。
+ipcRoute('POST', '/api/sessions/:sessionId/footer-dir', async (req, res, params) => {
+  let body: Record<string, unknown>;
+  try { body = await readJsonBody<Record<string, unknown>>(req, 8_192); } catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  const active = findActiveBySessionId(params.sessionId);
+  const auth = sessionCliIpcAuth(req, active, params.sessionId, body);
+  if (!auth.ok) return jsonRes(res, 403, { ok: false, error: auth.error });
+  const dir = typeof body.dir === 'string' ? body.dir : '';
+  if (!isAbsolute(dir) || !(() => { try { return statSync(dir).isDirectory(); } catch { return false; } })()) return jsonRes(res, 400, { ok: false, error: 'bad_dir' });
+  const session = active?.session ?? sessionStore.getOwnedSession(params.sessionId);
+  if (!session) return jsonRes(res, 404, { ok: false, error: 'session_not_found' });
+  if (session.footerDir !== dir) {
+    session.footerDir = dir;
+    sessionStore.updateSession(session);
+  }
+  jsonRes(res, 200, { ok: true, footerDir: dir });
 });
 
 // 会话锁定：保护被锁定会话不被 dashboard「清理空闲」批量关闭。锁定是会话元数据，

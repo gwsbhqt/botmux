@@ -22,6 +22,7 @@ import type { ReplyDelivery } from '../../core/reply-delivery.js';
 import { triggerUserAuthApplies, type TriggerUserAuthConfig } from '../../services/trigger-user-auth.js';
 import { larkToolPrompt } from '../../core/lark-tool-binding.js';
 import type { CliId } from './types.js';
+import { brandTemplateLinkKeys } from '../../im/lark/brand-template.js';
 
 /** The gated "no visible output is OK" hint reads `config.noVisibleOutputHint`
  *  by default, but a user customization can force it on/off. Keyed by the i18n
@@ -66,6 +67,19 @@ function feedbackResponseKindHint(locale?: Locale): string {
   return t('ai.routing.feedback_response_kind', undefined, locale);
 }
 
+/** 卡片签名（brandLabel）引用了 {mrUrl}/{meegoUrl} 时，告诉 agent 用 `botmux dir set` 记录链接。
+ *  链接只有 agent 知道（它建的 MR、它关联的 Meego 单），botmux 无从推断；没引用就不注入。
+ *  放在系统提示 / 首轮路由块里而不是 per-bot 角色里：配了签名的 bot 自动带上，且系统提示不会
+ *  随上下文压缩丢失。 */
+function dirLinksHint(brandLabel: string | undefined, locale?: Locale): string | undefined {
+  const keys = brandTemplateLinkKeys(brandLabel);
+  if (keys.length === 0) return undefined;
+  return t('ai.dir_links.intro', {
+    targets: keys.map(k => (k === 'mr' ? 'MR' : 'Meego')).join(' / '),
+    steps: keys.map(k => t(k === 'mr' ? 'ai.dir_links.mr' : 'ai.dir_links.meego', undefined, locale)).join(''),
+  }, locale);
+}
+
 /** Multiline/JSON-escaping rule plus a real, copy-pasteable quoted-heredoc
  *  example. Shared by BOTH injection paths — shell hints for non-injecting
  *  CLIs and system-prompt text for injectsSessionContext CLIs — so the wording
@@ -104,6 +118,7 @@ export function buildBotmuxShellHints(
   noTransport?: boolean,
   replyDelivery?: ReplyDelivery,
   cliId?: CliId,
+  brandLabel?: string,
 ): string[] {
   // No-transport session (apiOnly core-only bot OR HTTP virtual chat): drop the
   // whole send/@/helpers/silence collaboration block — same rationale as the
@@ -123,6 +138,7 @@ export function buildBotmuxShellHints(
   // 内置 botmux-send skill 自行发现）。缺省 / 'send' 时下面每一行与改动前逐字相同。
   const transcript = replyDelivery === 'transcript';
   const workflowHint = workflowDiscoveryHint(locale);
+  const linksHint = dirLinksHint(brandLabel, locale);
   const hints = (transcript
     ? [
       t('ai.shell.intro_transcript', undefined, locale),
@@ -133,6 +149,7 @@ export function buildBotmuxShellHints(
       // Workflow discovery — omitted when the machine-wide workflow switch is off.
       ...(workflowHint ? [workflowHint] : []),
       ...cursorBackgroundTaskNote(cliId, true, locale),
+      ...(linksHint ? [linksHint] : []),
       hiddenContextDefense(locale),
     ]
     : [
@@ -154,6 +171,7 @@ export function buildBotmuxShellHints(
       // Workflow discovery — omitted when the machine-wide workflow switch is off.
       ...(workflowHint ? [workflowHint] : []),
       ...cursorBackgroundTaskNote(cliId, false, locale),
+      ...(linksHint ? [linksHint] : []),
       hiddenContextDefense(locale),
     ]).map(escapeXmlTagLikeTokens);
   if (whiteboardEnabled()) {
@@ -315,11 +333,16 @@ export function buildBotmuxSystemPromptText(opts: {
   /** transcript-only: solo chat (owner + this bot). The identity block keeps
    *  name/open_id but drops routing_rules — there is no other bot to route to. */
   solo?: boolean;
+  /** This bot's brandLabel template. References {mrUrl}/{meegoUrl} → one line
+   *  asking the agent to record them via `botmux dir set`. Dropped for
+   *  no-transport sessions (no card, no footer). */
+  brandLabel?: string;
 }): string {
-  const { locale, botName, botOpenId, builtinSkillBlock, noTransport, triggerUserAuth, larkToolAppId, replyDelivery, solo } = opts;
+  const { locale, botName, botOpenId, builtinSkillBlock, noTransport, triggerUserAuth, larkToolAppId, replyDelivery, solo, brandLabel } = opts;
   const transcript = !noTransport && replyDelivery === 'transcript';
   const unknown = t('ai.identity.unknown', undefined, locale);
   const workflowHint = workflowDiscoveryHint(locale);
+  const linksHint = dirLinksHint(brandLabel, locale);
   const prose = (key: string): string =>
     escapeXmlTagLikeTokens(t(key, undefined, locale));
   // identity carries the bot's name/open_id PLUS routing_rules that are the same
@@ -390,6 +413,7 @@ export function buildBotmuxSystemPromptText(opts: {
       prose('ai.routing.ask_wait'),
       prose('ai.routing.usage_silence'),
       ...(workflowHint ? [escapeXmlTagLikeTokens(workflowHint)] : []),
+      ...(linksHint ? [escapeXmlTagLikeTokens(linksHint)] : []),
       hiddenContextDefense(locale),
       ...whiteboardRouting,
     ]
@@ -412,6 +436,7 @@ export function buildBotmuxSystemPromptText(opts: {
       ...(noVisibleOutputHintOn() ? [prose('ai.routing.no_visible_output_ok')] : []),
       // Workflow discovery — omitted when the machine-wide workflow switch is off.
       ...(workflowHint ? [escapeXmlTagLikeTokens(workflowHint)] : []),
+      ...(linksHint ? [escapeXmlTagLikeTokens(linksHint)] : []),
       hiddenContextDefense(locale),
       ...whiteboardRouting,
     ];

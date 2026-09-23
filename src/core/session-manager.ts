@@ -124,6 +124,12 @@ type RefreshCliVersion = (
   botConfig: Pick<BotConfig, 'cliId' | 'cliRuntime' | 'cliPathOverride'>,
 ) => boolean;
 
+/** 本 bot 的卡片签名模板（daemon 内存里的 registry 就是权威值）；未注册 → undefined。 */
+function brandLabelFor(larkAppId: string | undefined): string | undefined {
+  if (!larkAppId) return undefined;
+  try { return getBot(larkAppId)?.config?.brandLabel; } catch { return undefined; }
+}
+
 function sessionCreatedAtMs(session: { createdAt?: string }): number {
   return session.createdAt ? (Date.parse(session.createdAt) || Date.now()) : Date.now();
 }
@@ -1343,7 +1349,7 @@ function buildNewTopicBlocks(
   // hint list is unchanged.
   const hints = adapter.injectsSessionContext
     ? []
-    : buildBotmuxShellHints(locale, noTransport, replyDelivery, cliId);
+    : buildBotmuxShellHints(locale, noTransport, replyDelivery, cliId, brandLabelFor(opts?.larkAppId));
 
   const routingBlock = hints.length > 0
     ? `<botmux_routing>\n${hints.join('\n')}\n</botmux_routing>`

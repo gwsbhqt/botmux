@@ -1,8 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { renderBrandTemplate } from '../src/im/lark/brand-template.js';
+import { brandDirOf, brandTemplateLinkKeys, renderBrandTemplate, setDirLink } from '../src/im/lark/brand-template.js';
 
 // 镜像 brand-template.ts 的 safeText：脚注里显示的文本会走 escapeLarkMd（& < > * _ ~ `）
 // + 剥离链接结构 [ ] ( )。路径派生的显示值也过它，所以下面用它算期望。
@@ -188,5 +189,97 @@ describe('renderBrandTemplate', () => {
     const dir = mkdtempSync(join(tmpdir(), 'brand-'));
     writeFileSync(join(dir, '.botmux-dir.json'), JSON.stringify({ name: 'foo{cwd}bar' }));
     expect(renderBrandTemplate('{cwdName}', dir)).toBe('foo{cwd}bar');
+  });
+});
+
+// ── 仓库 / 分支 / MR / Meego 变量 ────────────────────────────────────────
+describe('renderBrandTemplate: git 与分支链接变量', () => {
+  const T = '[{repo}]({repoUrl}) · [{branch}]({branchUrl}) · [MR]({mrUrl}) · [Meego]({meegoUrl})';
+  const gitRun = (cwd: string, ...args: string[]) =>
+    execFileSync('git', args, { cwd, stdio: 'pipe', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' } });
+  function repo(branch: string, remote?: string): string {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'brand-git-')));
+    gitRun(dir, 'init', '-q', '-b', branch);
+    if (remote) gitRun(dir, 'remote', 'add', 'origin', remote);
+    return dir;
+  }
+
+  it('还没有 MR/Meego：只显示仓库与分支两段', () => {
+    const dir = repo('feat/skill-category', 'git@git.example.com:team/app.git');
+    expect(renderBrandTemplate(T, dir)).toBe(
+      '[app](https://git.example.com/team/app) · [feat/skill-category](https://git.example.com/team/app/tree/feat/skill-category)',
+    );
+  });
+
+  it('setDirLink 写入当前分支后四段齐全；切到别的分支不显示上一个分支的 MR', () => {
+    const dir = repo('feat/a', 'git@git.example.com:team/app.git');
+    expect(setDirLink(dir, 'mr', 'https://git.example.com/team/app/merge_requests/12')).toMatchObject({ ok: true, branch: 'feat/a' });
+    expect(setDirLink(dir, 'meego', 'https://meego.example.com/aily/story/detail/34')).toMatchObject({ ok: true });
+    expect(renderBrandTemplate(T, dir)).toBe(
+      '[app](https://git.example.com/team/app) · [feat/a](https://git.example.com/team/app/tree/feat/a)'
+      + ' · [MR](https://git.example.com/team/app/merge_requests/12) · [Meego](https://meego.example.com/aily/story/detail/34)',
+    );
+    gitRun(dir, 'checkout', '-q', '-b', 'feat/b');
+    expect(renderBrandTemplate(T, dir)).not.toContain('MR');
+    expect(renderBrandTemplate(T, dir)).not.toContain('Meego');
+  });
+
+  it('setDirLink 保留已有字段、unset 清除、自动加进 info/exclude', () => {
+    const dir = repo('main');
+    writeFileSync(join(dir, '.botmux-dir.json'), JSON.stringify({ name: '角色', url: 'https://x.feishu.cn/docx/abc' }));
+    const r = setDirLink(dir, 'mr', 'https://h/g/r/merge_requests/1');
+    expect(r).toMatchObject({ ok: true, excluded: true });
+    const saved = JSON.parse(readFileSync(join(dir, '.botmux-dir.json'), 'utf-8'));
+    expect(saved).toMatchObject({ name: '角色', url: 'https://x.feishu.cn/docx/abc', branches: { main: { mr: 'https://h/g/r/merge_requests/1' } } });
+    expect(readFileSync(join(dir, '.git/info/exclude'), 'utf-8')).toContain('.botmux-dir.json');
+    expect(gitRun(dir, 'status', '--porcelain').toString()).toBe('');
+    setDirLink(dir, 'mr', null);
+    expect(JSON.parse(readFileSync(join(dir, '.botmux-dir.json'), 'utf-8')).branches).toBeUndefined();
+  });
+
+  it('setDirLink 拒绝非 http(s) / 会击穿链接的地址', () => {
+    const dir = repo('main');
+    expect(setDirLink(dir, 'mr', 'javascript:alert(1)')).toMatchObject({ ok: false, reason: 'invalid_url' });
+    expect(setDirLink(dir, 'mr', 'https://x/a) **spoof**')).toMatchObject({ ok: false, reason: 'invalid_url' });
+  });
+
+  it('没有 remote：仓库名降级为纯文本，分支链接整段为空时只剩分支名', () => {
+    const dir = repo('main');
+    expect(renderBrandTemplate(T, dir)).toBe(`${basename(dir)} · main`);
+  });
+
+  it('不在 git 仓库：git 段全部隐藏，顶层 links 仍可用', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'brand-nogit-'));
+    expect(renderBrandTemplate(T, dir)).toBe('');
+    setDirLink(dir, 'mr', 'https://h/g/r/merge_requests/9');
+    expect(renderBrandTemplate(T, dir)).toBe('[MR](https://h/g/r/merge_requests/9)');
+  });
+
+  it('分支名含 ] 与 markdown 字符时被消毒', () => {
+    const dir = repo('main');
+    writeFileSync(join(dir, '.git/HEAD'), 'ref: refs/heads/a]*b\n');
+    const out = renderBrandTemplate('[{branch}](https://x.example/)', dir)!;
+    expect(out.split('](https://x.example/)')[0]).not.toContain(']');
+    expect(out).toContain('\\*');
+  });
+
+  it('无变量的段始终保留；变量全空的段被去掉', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'brand-seg-'));
+    expect(renderBrandTemplate('by bot · [MR]({mrUrl})', dir)).toBe('by bot');
+  });
+
+  it('brandTemplateLinkKeys 只识别 MR / Meego 变量', () => {
+    expect(brandTemplateLinkKeys(T)).toEqual(['mr', 'meego']);
+    expect(brandTemplateLinkKeys('[{cwdName}]({cwdUrl})')).toEqual([]);
+    expect(brandTemplateLinkKeys(undefined)).toEqual([]);
+  });
+});
+
+describe('brandDirOf', () => {
+  it('footerDir 优先，缺省回落 workingDir', () => {
+    expect(brandDirOf({ footerDir: '/wt', workingDir: '/repo' })).toBe('/wt');
+    expect(brandDirOf({ workingDir: '/repo' })).toBe('/repo');
+    expect(brandDirOf({ footerDir: '', workingDir: '/repo' })).toBe('/repo');
+    expect(brandDirOf(undefined)).toBeUndefined();
   });
 });

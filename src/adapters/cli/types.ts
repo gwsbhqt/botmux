@@ -201,6 +201,11 @@ export interface CliAdapter {
      *  to state that lark-cli defaults to the bot even when other tools keep
      *  per-turn initiator credentials. */
     larkToolAppId?: string;
+    /** This bot's configured brandLabel template (card-footer signature). When it
+     *  references {mrUrl}/{meegoUrl}, injectsSessionContext adapters forward it so
+     *  the system prompt tells the agent to record those links via
+     *  `botmux dir set`. Unset / no link vars → no extra prompt text. */
+    brandLabel?: string;
     /** Env the CLI must forward to the SHELL COMMANDS it runs, not merely hold
      *  itself. Codex does not pass its own environment to shell subprocesses,
      *  so the trigger-user wrapper vars (BOTMUX_IDENTITY_BIN / ZDOTDIR /
