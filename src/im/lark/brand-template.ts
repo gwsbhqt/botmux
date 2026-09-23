@@ -145,6 +145,11 @@ const GIT_VARS = new Set(['repo', 'repoUrl', 'branch', 'branchUrl', 'mrUrl', 'me
 const SEGMENT_SPLIT = /\s+·\s+/;
 const SEGMENT_JOIN = ' · ';
 
+/** 模板是否引用了按目录渲染的 git 变量（仓库 / 分支 / MR / Meego）。 */
+export function brandTemplateUsesGit(brand: string | undefined): boolean {
+  return !!brand && /\{(?:repoUrl|repo|branchUrl|branch|mrUrl|meegoUrl)\}/.test(brand);
+}
+
 /** 模板是否引用了需要 agent 用 `botmux dir set` 写入的链接变量。 */
 export function brandTemplateLinkKeys(brand: string | undefined): DirLinkKey[] {
   if (!brand) return [];

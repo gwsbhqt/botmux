@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { homedir, tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { brandDirOf, brandTemplateLinkKeys, renderBrandTemplate, setDirLink } from '../src/im/lark/brand-template.js';
+import { brandDirOf, brandTemplateLinkKeys, brandTemplateUsesGit, renderBrandTemplate, setDirLink } from '../src/im/lark/brand-template.js';
 
 // 镜像 brand-template.ts 的 safeText：脚注里显示的文本会走 escapeLarkMd（& < > * _ ~ `）
 // + 剥离链接结构 [ ] ( )。路径派生的显示值也过它，所以下面用它算期望。
@@ -266,6 +266,13 @@ describe('renderBrandTemplate: git 与分支链接变量', () => {
   it('无变量的段始终保留；变量全空的段被去掉', () => {
     const dir = mkdtempSync(join(tmpdir(), 'brand-seg-'));
     expect(renderBrandTemplate('by bot · [MR]({mrUrl})', dir)).toBe('by bot');
+  });
+
+  it('brandTemplateUsesGit 识别仓库 / 分支 / 链接变量', () => {
+    expect(brandTemplateUsesGit('{branch}')).toBe(true);
+    expect(brandTemplateUsesGit('[MR]({mrUrl})')).toBe(true);
+    expect(brandTemplateUsesGit('[{cwdName}]({cwdUrl})')).toBe(false);
+    expect(brandTemplateUsesGit(undefined)).toBe(false);
   });
 
   it('brandTemplateLinkKeys 只识别 MR / Meego 变量', () => {

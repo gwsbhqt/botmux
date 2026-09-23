@@ -5870,7 +5870,7 @@ async function cmdRoleSwitch(argv: string[]): Promise<void> {
   process.exit(1);
 }
 
-const DIR_USAGE = '用法: botmux dir set <mr|meego> <url> | dir unset <mr|meego> | dir show  [--dir <path>]';
+const DIR_USAGE = '用法: botmux dir use | dir set <mr|meego> <url> | dir unset <mr|meego> | dir show  [--dir <path>]';
 
 /**
  * `botmux dir` — 读写 `.botmux-dir.json` 里当前分支的 MR / Meego 链接（卡片签名
@@ -5893,6 +5893,14 @@ async function cmdDir(argv: string[]): Promise<void> {
   let session: ReturnType<typeof detectCurrentSession> = null;
   try { session = detectCurrentSession(); } catch { /* 沙箱读不到 sessions：只影响页脚目录上报 */ }
 
+  if (sub === 'use') {
+    // 进入 worktree 开始干活时先登记，建 MR 之前页脚也显示正确的仓库与分支。
+    // Claude Code 每条命令后把 shell cwd 重置回会话目录，botmux 从外面看不出 agent 在哪。
+    if (pos.length !== 1) { console.error(DIR_USAGE); process.exit(1); }
+    if (!findAncestorSessionId() && !session) { console.error('✗ dir use 只能在 botmux 会话内执行'); process.exit(1); }
+    await reportFooterDir(dir, session, true);
+    return;
+  }
   if (sub === 'show') {
     const branch = readGitDirInfo(dir)?.branch;
     const meta = readDirMeta(dir);
@@ -5920,10 +5928,10 @@ async function cmdDir(argv: string[]): Promise<void> {
 }
 
 /** 把页脚目录报给 daemon。失败只提示、不改退出码：链接已落盘，页脚只是暂时还读旧目录。 */
-async function reportFooterDir(dir: string, session: ReturnType<typeof detectCurrentSession>): Promise<void> {
+async function reportFooterDir(dir: string, session: ReturnType<typeof detectCurrentSession>, loud = false): Promise<void> {
   const sid = session?.sessionId ?? findAncestorSessionId();
   if (!sid) return; // 会话外执行：没有页脚可更新
-  if (session?.footerDir === dir) return;
+  if (session?.footerDir === dir) { if (loud) console.log(`✓ 页脚已是 ${dir}`); return; }
   const appId = session?.larkAppId ?? process.env.BOTMUX_LARK_APP_ID;
   const daemon = findDaemon(appId);
   const warn = (why: string) => console.log(`  提示：未能把页脚切到 ${dir}（${why}），页脚仍按会话工作目录显示`);
@@ -5931,7 +5939,7 @@ async function reportFooterDir(dir: string, session: ReturnType<typeof detectCur
   try {
     const res = await postSessionCliIpc(daemon.ipcPort, sid, 'footer-dir', { dir });
     const body: any = await res.json().catch(() => ({}));
-    if (res.ok && body?.ok) console.log(`  页脚改为显示 ${dir} 的仓库与分支`);
+    if (res.ok && body?.ok) console.log(`${loud ? '✓' : ' '} 页脚改为显示 ${dir} 的仓库与分支`);
     else warn(body?.error ?? `HTTP ${res.status}`);
   } catch (e: any) {
     warn(e?.message ?? String(e));
@@ -6671,6 +6679,7 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
   slash "<斜杠命令>"   会话空闲后向本会话 CLI 注入一条原生斜杠命令（需 bots.json 配 tuiSlashAllow；/cd 恒被拒）
   role switch <目录>  （会话内）切换本话题到角色库内的角色目录——角色切换用；
                    目录必须位于 ~/botmux-roles 之下
+  dir use          （会话内）把本会话卡片页脚切到当前所在仓库（进入 worktree 干活时执行）
   dir set <mr|meego> <url>  （会话内）记录当前分支的 MR / Meego 链接，卡片签名
                    {mrUrl}/{meegoUrl} 变量读这里；dir unset <mr|meego> 清除，dir show 查看
                    --dir <path>   指定目录（缺省：当前会话工作目录，会话外为当前目录）
