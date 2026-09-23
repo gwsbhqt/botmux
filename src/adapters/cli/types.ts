@@ -166,6 +166,11 @@ export interface CliAdapter {
      *  on-disk store holds everyone else's, and nothing in the OS currently
      *  stops an agent from reading those files. Off → no extra prompt text. */
     triggerUserAuth?: boolean;
+    /** This bot's configured brandLabel template (card-footer signature). When it
+     *  references {mrUrl}/{meegoUrl}, injectsSessionContext adapters forward it so
+     *  the system prompt tells the agent to record those links via
+     *  `botmux dir set`. Unset / no link vars → no extra prompt text. */
+    brandLabel?: string;
     /** Env the CLI must forward to the SHELL COMMANDS it runs, not merely hold
      *  itself. Codex does not pass its own environment to shell subprocesses,
      *  so the trigger-user wrapper vars (BOTMUX_IDENTITY_BIN / ZDOTDIR /

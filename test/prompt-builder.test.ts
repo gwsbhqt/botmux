@@ -1102,6 +1102,20 @@ describe('replyDelivery=transcript envelope', () => {
     expect(out).not.toContain('BOTMUX_NOTHING_TO_SEND');
   });
 
+  it('签名引用 {mrUrl} 时，非注入式 CLI 首轮路由提示带上 botmux dir set', () => {
+    const build = () => buildNewTopicPrompt(
+      '@Bot 帮我看下', 'sess-t6', 'codex', undefined, attachments, mentions, undefined, undefined,
+      { name: 'Bot', openId: 'ou_bot' }, 'zh', sender, { larkAppId: 'app_test', chatId: 'oc_1', selfMention },
+    );
+    expect(build()).not.toContain('botmux dir set');
+    mockBotConfig.brandLabel = '[{branch}]({branchUrl}) · [MR]({mrUrl})';
+    try {
+      expect(build()).toContain('botmux dir set mr');
+    } finally {
+      delete mockBotConfig.brandLabel;
+    }
+  });
+
   it('transcript 首轮（非注入式 codex）：routing 不提 botmux send、identity 无 short_routing；solo 时去壳', () => {
     mockBotConfig.replyDelivery = 'transcript';
     const build = (solo: boolean) => buildNewTopicPrompt(

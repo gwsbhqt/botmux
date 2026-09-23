@@ -20,6 +20,8 @@ export function repinSessionWorkingDir(ds: DaemonSession, resolvedPath: string):
   // refork 仍按旧仓库组合推导、无视新目录。IM /cd 与 IPC cd 路由共用本函数，
   // 两条改 cwd 的路径都必须清。
   ds.session.riffRepoDirs = undefined;
+  // 页脚目录是「上一个工作目录里 agent 待过的仓库」，换目录后同样作废。
+  ds.session.footerDir = undefined;
   sessionStore.updateSession(ds.session);
   dashboardEventBus.publish({
     type: 'session.update',

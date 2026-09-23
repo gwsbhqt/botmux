@@ -15268,6 +15268,9 @@ async function spawnCli(
     // agent from reading another person's token file today, and the likeliest
     // way that happens is an agent grepping the data dir to debug an auth error.
     triggerUserAuth: cfg.triggerUserAuth?.enabled === true,
+    // Card-footer template: {mrUrl}/{meegoUrl} in it → system prompt asks the
+    // agent to record those links (`botmux dir set`). Cosmetic, not a credential.
+    brandLabel: resolveBrandLabel(cfg.larkAppId),
     // Codex and TraeX explicitly set these in tool shells instead of depending
     // on the CLI's default inheritance policy; other adapters inherit normally.
     ...(Object.keys(identityShellEnv).length ? { shellSubprocessEnv: identityShellEnv } : {}),

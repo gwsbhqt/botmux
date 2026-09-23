@@ -3741,6 +3741,8 @@ interface SessionData {
   closedAt?: string;
   pid?: number;
   workingDir?: string;
+  /** 卡片签名读取的目录（`botmux dir set` 上报）；缺省用 workingDir。 */
+  footerDir?: string;
   webPort?: number;
   larkAppId?: string;
   ownerOpenId?: string;
@@ -5429,7 +5431,7 @@ async function cmdSuspend(): Promise<void> {
 async function postSessionCliIpc(
   ipcPort: number,
   sessionId: string,
-  route: 'slash' | 'cd' | 'close' | 'preview' | 'chat-rename' | 'rename' | 'project' | 'continuation',
+  route: 'slash' | 'cd' | 'close' | 'preview' | 'chat-rename' | 'rename' | 'project' | 'continuation' | 'footer-dir',
   payload: Record<string, unknown>,
 ): Promise<Response> {
   const requestBody: Record<string, unknown> = { ...payload };
@@ -5866,6 +5868,74 @@ async function cmdRoleSwitch(argv: string[]): Promise<void> {
   }
   console.error(`✗ 切换被拒绝: ${body?.error ?? `HTTP ${res.status}`}`);
   process.exit(1);
+}
+
+const DIR_USAGE = '用法: botmux dir set <mr|meego> <url> | dir unset <mr|meego> | dir show  [--dir <path>]';
+
+/**
+ * `botmux dir` — 读写 `.botmux-dir.json` 里当前分支的 MR / Meego 链接（卡片签名
+ * {mrUrl}/{meegoUrl} 的数据源）。
+ *
+ * 目标目录缺省取**当前所在 git 仓库的根**，而不是会话工作目录：agent 常在会话目录之外新建
+ * worktree 干活，链接要记在那个 worktree 的分支名下。`set` 成功后再把这个目录上报给 daemon
+ * 作为本会话的页脚目录（footerDir），页脚的仓库 / 分支 / MR / Meego 都改从这里读。
+ */
+async function cmdDir(argv: string[]): Promise<void> {
+  const { DIR_LINK_KEYS, brandDirOf, readDirMeta, setDirLink } = await import('./im/lark/brand-template.js');
+  const { readGitDirInfo } = await import('./utils/git-dir-info.js');
+  const dIdx = argv.indexOf('--dir');
+  const explicitDir = dIdx >= 0 ? argv[dIdx + 1] : undefined;
+  if (dIdx >= 0 && !explicitDir) { console.error(DIR_USAGE); process.exit(1); }
+  const pos = argv.filter((_a, i) => !(dIdx >= 0 && (i === dIdx || i === dIdx + 1)));
+  const [sub, key, url] = pos;
+  const base = resolve(explicitDir ?? process.cwd());
+  const dir = readGitDirInfo(base)?.topLevel ?? base;
+  let session: ReturnType<typeof detectCurrentSession> = null;
+  try { session = detectCurrentSession(); } catch { /* 沙箱读不到 sessions：只影响页脚目录上报 */ }
+
+  if (sub === 'show') {
+    const branch = readGitDirInfo(dir)?.branch;
+    const meta = readDirMeta(dir);
+    const links = branch ? meta.branches?.[branch] : meta.links;
+    console.log(`目录: ${dir}${branch ? `\n分支: ${branch}` : ''}`);
+    for (const k of DIR_LINK_KEYS) console.log(`${k}: ${links?.[k] ?? '（未设置）'}`);
+    const footer = brandDirOf(session ?? undefined);
+    if (footer) console.log(`本会话页脚目录: ${footer}`);
+    return;
+  }
+  if ((sub !== 'set' && sub !== 'unset') || !DIR_LINK_KEYS.includes(key as any) || (sub === 'set' ? !url : url !== undefined)) {
+    console.error(DIR_USAGE);
+    process.exit(1);
+  }
+  const r = setDirLink(dir, key as 'mr' | 'meego', sub === 'set' ? url! : null);
+  if (!r.ok) {
+    console.error(r.reason === 'invalid_url'
+      ? `✗ 链接无效：只接受 http(s) 地址，且不能含空格、括号、引号、@ 等字符`
+      : `✗ 写入 ${dir} 失败：${r.detail ?? ''}`);
+    process.exit(1);
+  }
+  console.log(`✓ ${sub === 'set' ? `已记录 ${key}` : `已清除 ${key}`}（${r.branch ? `分支 ${r.branch}，` : ''}${r.file}）`);
+  if (r.excluded === false) console.log(`  提示：${r.file} 未被 git 忽略，可能出现在 git status 里`);
+  if (sub === 'set') await reportFooterDir(dir, session);
+}
+
+/** 把页脚目录报给 daemon。失败只提示、不改退出码：链接已落盘，页脚只是暂时还读旧目录。 */
+async function reportFooterDir(dir: string, session: ReturnType<typeof detectCurrentSession>): Promise<void> {
+  const sid = session?.sessionId ?? findAncestorSessionId();
+  if (!sid) return; // 会话外执行：没有页脚可更新
+  if (session?.footerDir === dir) return;
+  const appId = session?.larkAppId ?? process.env.BOTMUX_LARK_APP_ID;
+  const daemon = findDaemon(appId);
+  const warn = (why: string) => console.log(`  提示：未能把页脚切到 ${dir}（${why}），页脚仍按会话工作目录显示`);
+  if (!daemon) return warn('daemon 不在线');
+  try {
+    const res = await postSessionCliIpc(daemon.ipcPort, sid, 'footer-dir', { dir });
+    const body: any = await res.json().catch(() => ({}));
+    if (res.ok && body?.ok) console.log(`  页脚改为显示 ${dir} 的仓库与分支`);
+    else warn(body?.error ?? `HTTP ${res.status}`);
+  } catch (e: any) {
+    warn(e?.message ?? String(e));
+  }
 }
 
 /**
@@ -6601,6 +6671,9 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
   slash "<斜杠命令>"   会话空闲后向本会话 CLI 注入一条原生斜杠命令（需 bots.json 配 tuiSlashAllow；/cd 恒被拒）
   role switch <目录>  （会话内）切换本话题到角色库内的角色目录——角色切换用；
                    目录必须位于 ~/botmux-roles 之下
+  dir set <mr|meego> <url>  （会话内）记录当前分支的 MR / Meego 链接，卡片签名
+                   {mrUrl}/{meegoUrl} 变量读这里；dir unset <mr|meego> 清除，dir show 查看
+                   --dir <path>   指定目录（缺省：当前会话工作目录，会话外为当前目录）
   term-link [id]   获取活跃会话的「可操作终端」（带写 token）。不回显链接，改由
                    daemon 把可操作卡片私密发给 owner（群内仅你可见，话题/单聊回退 DM）。
                    单个活跃会话可省略 id
@@ -6780,6 +6853,7 @@ interface CurrentSession {
   chatId: string;
   rootMessageId: string;
   workingDir?: string;
+  footerDir?: string;
   larkAppId?: string;
   chatType?: 'group' | 'p2p';
   scope?: 'thread' | 'chat';
@@ -6799,6 +6873,7 @@ function detectCurrentSession(): CurrentSession | null {
     chatId: s.chatId,
     rootMessageId: s.rootMessageId,
     workingDir: s.workingDir,
+    footerDir: s.footerDir,
     larkAppId: s.larkAppId,
     chatType: s.chatType,
     scope: s.scope,
@@ -8161,7 +8236,7 @@ import { resolveFeedbackPolicyForDelivery, resolveFeedbackTeamId } from './servi
 import { normalizeFeedbackPolicy } from './services/feedback-policy.js';
 import { attachOncallGroupButton, recordOncallGroupDelivery } from './im/lark/oncall-group.js';
 import { applyInlineMentions, applyInlineMentionsToCard } from './im/lark/inline-mentions.js';
-import { renderBrandTemplate } from './im/lark/brand-template.js';
+import { brandDirOf, renderBrandTemplate } from './im/lark/brand-template.js';
 import {
   effectiveDefaultWorkingDir,
   getBot,
@@ -10916,7 +10991,7 @@ async function cmdSend(rest: string[]): Promise<void> {
       });
       const usageSnapshot = await readCardUsageSnapshotForSend(s, appId);
       const footer = buildReplyCardFooter({
-        brand: renderBrandTemplate(resolveBrandLabel(appId), s.workingDir),
+        brand: renderBrandTemplate(resolveBrandLabel(appId), brandDirOf(s)),
         recipientOpenIds: footerRecipients,
         usage: usageSnapshot,
         locale: localeForBot(appId),
@@ -15922,6 +15997,7 @@ switch (command) {
     process.exit(1);
     break;
   }
+  case 'dir': await cmdDir(process.argv.slice(3)); break;
   case 'role': {
     // `botmux role switch <角色目录>` — 角色切换（唯一入口）。名字→目录的解析由
     // 调用方（模型读 _role-protocol.md）完成，本命令只透传解析出的目标目录，daemon

@@ -480,6 +480,10 @@ export interface Session {
   restoreQuarantinedAt?: string;
   pid?: number;
   workingDir?: string;
+  /** 卡片签名 {repo}/{branch}/{mrUrl}/… 读取的目录：agent 最近一次 `botmux dir set` 时所在的
+   *  仓库根（常是它新建的 worktree，而不是会话工作目录）。缺省 → workingDir；workingDir
+   *  变更（/cd、role switch）时清除。纯展示用，不影响 spawn cwd / 沙箱。 */
+  footerDir?: string;
   webPort?: number;
   /** Agent-registered local Web preview for this session. The daemon accepts
    * only a reachable literal loopback target through the session-scoped CLI
