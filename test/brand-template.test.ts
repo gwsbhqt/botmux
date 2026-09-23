@@ -290,3 +290,41 @@ describe('brandDirOf', () => {
     expect(brandDirOf(undefined)).toBeUndefined();
   });
 });
+
+describe('renderBrandTemplate: {mrId}/{meegoId}', () => {
+  const T = '[{repo}]({repoUrl}) · [MR!{mrId}]({mrUrl}) · [Meego#{meegoId}]({meegoUrl})';
+  const gitRun = (cwd: string, ...args: string[]) =>
+    execFileSync('git', args, { cwd, stdio: 'pipe', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' } });
+  function repo(): string {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'brand-id-')));
+    gitRun(dir, 'init', '-q', '-b', 'feat/x');
+    gitRun(dir, 'remote', 'add', 'origin', 'git@git.example.com:team/app.git');
+    return dir;
+  }
+
+  it('编号取链接路径最后一段纯数字，链接保持原样', () => {
+    const dir = repo();
+    setDirLink(dir, 'mr', 'https://git.example.com/team/app/merge_requests/7890');
+    setDirLink(dir, 'meego', 'https://meego.example.com/space/story/detail/7379608026?tab=1');
+    expect(renderBrandTemplate(T, dir)).toBe(
+      '[app](https://git.example.com/team/app)'
+      + ' · [MR!7890](https://git.example.com/team/app/merge_requests/7890)'
+      + ' · [Meego#7379608026](https://meego.example.com/space/story/detail/7379608026?tab=1)',
+    );
+  });
+
+  it('还没记录链接：MR / Meego 两段整段隐藏，不留「MR!」', () => {
+    expect(renderBrandTemplate(T, repo())).toBe('[app](https://git.example.com/team/app)');
+  });
+
+  it('GitHub PR 链接同样能取到编号', () => {
+    const dir = repo();
+    setDirLink(dir, 'mr', 'https://github.com/a/b/pull/12');
+    expect(renderBrandTemplate('[MR!{mrId}]({mrUrl})', dir)).toBe('[MR!12](https://github.com/a/b/pull/12)');
+  });
+
+  it('只用 {mrId} 也会触发写链接提示', () => {
+    expect(brandTemplateLinkKeys('MR!{mrId} · Meego#{meegoId}')).toEqual(['mr', 'meego']);
+    expect(brandTemplateUsesGit('MR!{mrId}')).toBe(true);
+  });
+});
