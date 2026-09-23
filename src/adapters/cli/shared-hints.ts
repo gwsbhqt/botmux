@@ -22,7 +22,7 @@ import type { ReplyDelivery } from '../../core/reply-delivery.js';
 import { triggerUserAuthApplies, type TriggerUserAuthConfig } from '../../services/trigger-user-auth.js';
 import { larkToolPrompt } from '../../core/lark-tool-binding.js';
 import type { CliId } from './types.js';
-import { brandTemplateLinkKeys } from '../../im/lark/brand-template.js';
+import { brandTemplateLinkKeys, brandTemplateUsesGit } from '../../im/lark/brand-template.js';
 
 /** The gated "no visible output is OK" hint reads `config.noVisibleOutputHint`
  *  by default, but a user customization can force it on/off. Keyed by the i18n
@@ -72,12 +72,14 @@ function feedbackResponseKindHint(locale?: Locale): string {
  *  放在系统提示 / 首轮路由块里而不是 per-bot 角色里：配了签名的 bot 自动带上，且系统提示不会
  *  随上下文压缩丢失。 */
 function dirLinksHint(brandLabel: string | undefined, locale?: Locale): string | undefined {
+  if (!brandTemplateUsesGit(brandLabel)) return undefined;
   const keys = brandTemplateLinkKeys(brandLabel);
-  if (keys.length === 0) return undefined;
-  return t('ai.dir_links.intro', {
+  const use = t('ai.dir_links.use', undefined, locale);
+  if (keys.length === 0) return use;
+  return `${use}${t('ai.dir_links.intro', {
     targets: keys.map(k => (k === 'mr' ? 'MR' : 'Meego')).join(' / '),
     steps: keys.map(k => t(k === 'mr' ? 'ai.dir_links.mr' : 'ai.dir_links.meego', undefined, locale)).join(''),
-  }, locale);
+  }, locale)}`;
 }
 
 /** Multiline/JSON-escaping rule plus a real, copy-pasteable quoted-heredoc

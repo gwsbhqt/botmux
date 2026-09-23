@@ -13,8 +13,20 @@ describe('签名引用 MR/Meego 变量时提示 agent 记录链接', () => {
     expect(onlyMr).not.toContain('botmux dir set meego');
   });
 
+  it('只用仓库/分支变量：只提示 botmux dir use，不提 set', () => {
+    const out = buildBotmuxSystemPromptText({ locale: 'zh', brandLabel: '[{repo}]({repoUrl}) · {branch}' });
+    expect(out).toContain('botmux dir use');
+    expect(out).not.toContain('botmux dir set');
+  });
+
+  it('用到 MR/Meego 变量时 use 与 set 都提示', () => {
+    const out = buildBotmuxSystemPromptText({ locale: 'en', brandLabel: T });
+    expect(out).toContain('botmux dir use');
+    expect(out).toContain('botmux dir set mr');
+  });
+
   it('未引用 / 未配置 / 无传输会话：不注入', () => {
-    expect(buildBotmuxSystemPromptText({ locale: 'zh', brandLabel: '[{cwdName}]({cwdUrl})' })).not.toContain('botmux dir set');
+    expect(buildBotmuxSystemPromptText({ locale: 'zh', brandLabel: '[{cwdName}]({cwdUrl})' })).not.toContain('botmux dir');
     expect(buildBotmuxSystemPromptText({ locale: 'zh' })).not.toContain('botmux dir set');
     expect(buildBotmuxSystemPromptText({ locale: 'zh', brandLabel: T, noTransport: true })).not.toContain('botmux dir set');
   });
