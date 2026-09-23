@@ -139,23 +139,35 @@ function linkFor(meta: DirMeta, branch: string | undefined, key: DirLinkKey): st
   return branch ? meta.branches?.[branch]?.[key] : meta.links?.[key];
 }
 
-const VAR_RE = /\{(cwdName|cwdUrl|cwd|repoUrl|repo|branchUrl|branch|mrUrl|meegoUrl)\}/g;
-const GIT_VARS = new Set(['repo', 'repoUrl', 'branch', 'branchUrl', 'mrUrl', 'meegoUrl']);
+const VAR_RE = /\{(cwdName|cwdUrl|cwd|repoUrl|repo|branchUrl|branch|mrUrl|mrId|meegoUrl|meegoId)\}/g;
+const GIT_VARS = new Set(['repo', 'repoUrl', 'branch', 'branchUrl']);
+
+/** 链接里的编号：路径上最后一段纯数字（…/merge_requests/7188 → 7188、…/pull/12 → 12、
+ *  …/story/detail/7379608026 → 7379608026）。没有 → ''。 */
+function linkNumber(url: string | undefined): string {
+  if (!url) return '';
+  try {
+    const seg = new URL(url).pathname.split('/').filter(s => /^\d+$/.test(s));
+    return seg.length ? seg[seg.length - 1] : '';
+  } catch {
+    return '';
+  }
+}
 /** 模板按「 · 」分段；与 buildReplyCardFooter 拼接各段用的分隔符一致。 */
 const SEGMENT_SPLIT = /\s+·\s+/;
 const SEGMENT_JOIN = ' · ';
 
 /** 模板是否引用了按目录渲染的 git 变量（仓库 / 分支 / MR / Meego）。 */
 export function brandTemplateUsesGit(brand: string | undefined): boolean {
-  return !!brand && /\{(?:repoUrl|repo|branchUrl|branch|mrUrl|meegoUrl)\}/.test(brand);
+  return !!brand && /\{(?:repoUrl|repo|branchUrl|branch|mrUrl|mrId|meegoUrl|meegoId)\}/.test(brand);
 }
 
 /** 模板是否引用了需要 agent 用 `botmux dir set` 写入的链接变量。 */
 export function brandTemplateLinkKeys(brand: string | undefined): DirLinkKey[] {
   if (!brand) return [];
   return [
-    ...(brand.includes('{mrUrl}') ? ['mr' as const] : []),
-    ...(brand.includes('{meegoUrl}') ? ['meego' as const] : []),
+    ...(/\{mr(?:Url|Id)\}/.test(brand) ? ['mr' as const] : []),
+    ...(/\{meego(?:Url|Id)\}/.test(brand) ? ['meego' as const] : []),
   ];
 }
 
@@ -163,7 +175,7 @@ export function brandTemplateLinkKeys(brand: string | undefined): DirLinkKey[] {
  * brandLabel 变量替换：
  *   {cwdName}（元数据 name → basename）、{cwd}、{cwdUrl}
  *   {repo}、{repoUrl}、{branch}、{branchUrl}（读 workingDir 所在 git 仓库）
- *   {mrUrl}、{meegoUrl}（.botmux-dir.json 里当前分支的链接）
+ *   {mrUrl}、{meegoUrl}（.botmux-dir.json 里当前分支的链接）、{mrId}、{meegoId}（链接路径里的编号）
  * 仅当模板含 '{' 时激活（存量签名零影响）。模板按「 · 」分段：一段里的变量**全部**为空 →
  * 整段不显示（还没建 MR 时 `[MR]({mrUrl})` 不留一个点不了的「MR」）；部分为空 → 空链接
  * [x]() 降级为纯文本 x（没有 remote 时 `[{repo}]({repoUrl})` 仍显示仓库名）。
@@ -187,7 +199,7 @@ export function renderBrandTemplate(
   };
   const value = (name: string): string => {
     if (!wd) return '';
-    if (GIT_VARS.has(name) && !gitInfo() && name !== 'mrUrl' && name !== 'meegoUrl') return '';
+    if (GIT_VARS.has(name) && !gitInfo()) return '';
     switch (name) {
       case 'cwdName': return meta.name ?? safeText(basename(wd));
       case 'cwd': return safeText(wd);
@@ -197,7 +209,9 @@ export function renderBrandTemplate(
       case 'branch': return safeText(gitInfo()!.branch ?? '');
       case 'branchUrl': return safeUrl(branchWebUrl(getRepoUrl(), gitInfo()!.branch)) ?? '';
       case 'mrUrl': return linkFor(meta, gitInfo()?.branch, 'mr') ?? '';
+      case 'mrId': return linkNumber(linkFor(meta, gitInfo()?.branch, 'mr'));
       case 'meegoUrl': return linkFor(meta, gitInfo()?.branch, 'meego') ?? '';
+      case 'meegoId': return linkNumber(linkFor(meta, gitInfo()?.branch, 'meego'));
       default: return '';
     }
   };
