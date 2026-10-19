@@ -164,7 +164,7 @@ function expandHomeTokens(raw: string): string {
 /**
  * 这条 hook 命令引用的 botmux 目标（`cli.js` / 打包二进制）在本机是否**真实存在**。
  *
- * 用途见 hasLiveCustomBotmuxHook：区分「用户手改过、但仍然跑得起来」与「指向已消失
+ * 用途见 findLiveCustomBotmuxHook：区分「用户手改过、但仍然跑得起来」与「指向已消失
  * 的旧路径」。命令可能是任意 shell 片段（守卫 + `exec` + 引号），所以不做解析，只把
  * 所有引号包裹或空白分隔的 token 拿出来逐个试——命中一个存在的即可。
  */
@@ -246,31 +246,26 @@ function botmuxHookContractSignature(command: string): string | undefined {
  * 改它的 timeout —— 既然这份配置由他自己管，超时阈值也交给他；真要调整由本函数外的
  * 覆盖路径（签名变化时）一并带上。
  */
-function hasLiveCustomBotmuxHook(
+function findLiveCustomBotmuxHook(
   groups: readonly ClaudeHookGroup[] | undefined,
   canonicalCommand: string,
-): boolean {
-  if (!Array.isArray(groups)) return false;
+): string | undefined {
+  if (!Array.isArray(groups)) return undefined;
   const canonicalSignature = botmuxHookContractSignature(canonicalCommand);
-  // 连我们自己要写的命令都抽不出签名（形态异常）时不敢保留，一律走覆盖。
-  if (!canonicalSignature) return false;
-  return (groups as readonly ClaudeHookGroup[]).some((group) => {
-    // settings.json 是用户可手编的，形状不可信：逐层 Array.isArray 兜脏数据
-    // （与 isBotmuxReadyHookGroup 同一防御风格）。
-    const entries = group?.hooks;
-    if (!Array.isArray(entries)) return false;
-    return (entries as readonly ClaudeHookEntry[]).some(
-      (e) =>
-        !!e &&
-        e.type === 'command' &&
-        typeof e.command === 'string' &&
-        e.command !== canonicalCommand &&
-        botmuxHookContractSignature(e.command) === canonicalSignature &&
-        botmuxHookTargetResolves(e.command),
+  if (!canonicalSignature) return undefined;
+  for (const group of groups) {
+    if (!Array.isArray(group?.hooks)) continue;
+    const entry = group.hooks.find(e =>
+      e?.type === 'command'
+      && typeof e.command === 'string'
+      && e.command !== canonicalCommand
+      && botmuxHookContractSignature(e.command) === canonicalSignature
+      && botmuxHookTargetResolves(e.command),
     );
-  });
+    if (entry) return entry.command;
+  }
+  return undefined;
 }
-
 /**
  * 判断某个 hook group 是否是 botmux ask hook（用于幂等替换）。
  *
@@ -516,12 +511,11 @@ function installClaudeSettings(
 
   // 每个事件先看有没有「用户改造过且仍然有效」的同名 botmux hook —— 有就整段不碰
   // （既不删也不追加），把手改的可移植写法原样留住。判据与自愈边界见
-  // hasLiveCustomBotmuxHook。
+  // findLiveCustomBotmuxHook。
   const preserved: string[] = [];
 
   // 构造 botmux PreToolUse hook group（只拦截 AskUserQuestion）
-  const askCustomized = hasLiveCustomBotmuxHook(existingHooks['PreToolUse'], hookCommand)
-    || hasLiveCustomBotmuxHook(existingHooks['PermissionRequest'], hookCommand);
+  const askCustomized = findLiveCustomBotmuxHook(existingHooks['PreToolUse'], hookCommand);
   if (askCustomized) {
     preserved.push('PreToolUse');
   } else {
@@ -529,7 +523,6 @@ function installClaudeSettings(
     const newGroup: ClaudeHookGroup = { matcher: 'AskUserQuestion', hooks: [newEntry] };
 
     // 过滤掉旧的 botmux ask hook group（幂等 + 从 PermissionRequest 迁移到 PreToolUse）
-    removeBotmuxAskHookGroups(existingHooks, 'PermissionRequest', hookCommand);
     removeBotmuxAskHookGroups(existingHooks, 'PreToolUse', hookCommand);
     existingHooks['PreToolUse'] = [...(existingHooks['PreToolUse'] ?? []), newGroup];
   }
@@ -540,14 +533,23 @@ function installClaudeSettings(
   // 允许/拒绝卡片。不写 matcher = 所有工具；AskUserQuestion 由 hook 客户端自行分流。
   // timeout 900s 必须大于 hook 客户端的权限等待上限（cli.ts PERMISSION_MAX_TIMEOUT_MS），
   // 让客户端先到点给出「拒绝」裁决，而不是被 Claude 杀掉后回落到终端弹框。
-  existingHooks['PermissionRequest'] = [
-    ...(existingHooks['PermissionRequest'] ?? []),
-    { hooks: [{ type: 'command', command: hookCommand, timeout: 900 }] },
-  ];
+  const permissionCustomized = findLiveCustomBotmuxHook(
+    existingHooks['PermissionRequest']?.filter(group => !group.matcher || group.matcher === '*'),
+    hookCommand,
+  );
+  if (permissionCustomized) {
+    preserved.push('PermissionRequest');
+  } else {
+    removeBotmuxAskHookGroups(existingHooks, 'PermissionRequest', hookCommand);
+    existingHooks['PermissionRequest'] = [
+      ...(existingHooks['PermissionRequest'] ?? []),
+      { hooks: [{ type: 'command', command: askCustomized ?? hookCommand, timeout: 900 }] },
+    ];
+  }
 
   // SessionStart 就绪 hook（幂等替换旧的 botmux 条目）
   if (sessionStartCommand) {
-    if (hasLiveCustomBotmuxHook(existingHooks['SessionStart'], sessionStartCommand)) {
+    if (findLiveCustomBotmuxHook(existingHooks['SessionStart'], sessionStartCommand)) {
       preserved.push('SessionStart');
     } else {
       removeBotmuxReadyHookGroups(existingHooks, 'SessionStart');
@@ -561,7 +563,7 @@ function installClaudeSettings(
   // UserPromptSubmit per-turn 上下文 hook（#794，幂等替换旧的 botmux 条目）。
   // timeout 10s：hook 本身是纯文件读，10s 足够；防任何意外挂起。
   if (userPromptSubmitCommand) {
-    if (hasLiveCustomBotmuxHook(existingHooks['UserPromptSubmit'], userPromptSubmitCommand)) {
+    if (findLiveCustomBotmuxHook(existingHooks['UserPromptSubmit'], userPromptSubmitCommand)) {
       preserved.push('UserPromptSubmit');
     } else {
       removeBotmuxPromptHookGroups(existingHooks, 'UserPromptSubmit');

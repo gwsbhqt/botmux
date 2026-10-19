@@ -26,7 +26,7 @@ afterEach(async () => {
   if (handle) await handle.close();
   handle = null;
   setIpcAuthSecret(null);
-  sessionStore.init();
+  sessionStore.init('app', { owner: false });
   if (prevDataDir !== null) config.session.dataDir = prevDataDir;
   prevDataDir = null;
   if (dataDir) rmSync(dataDir, { recursive: true, force: true });
@@ -38,7 +38,7 @@ function setupStore() {
   dataDir = mkdtempSync(join(tmpdir(), 'ipc-footer-dir-'));
   prevDataDir = config.session.dataDir;
   config.session.dataDir = dataDir;
-  sessionStore.init();
+  sessionStore.init('app');
   return [
     sessionStore.createSession('oc_fd_a', 'om_fd_a', 'A', 'group'),
     sessionStore.createSession('oc_fd_b', 'om_fd_b', 'B', 'group'),

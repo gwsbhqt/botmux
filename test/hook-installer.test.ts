@@ -608,9 +608,34 @@ describe('installHook — claude-settings', () => {
         PreToolUse: [{ matcher: 'AskUserQuestion', hooks: [{ type: 'command', command: ask, timeout: 86400 }] }],
         SessionStart: [{ hooks: [{ type: 'command', command: ready }] }],
         UserPromptSubmit: [{ hooks: [{ type: 'command', command: prompt, timeout: 10 }] }],
+        PermissionRequest: [{ hooks: [{ type: 'command', command: ask, timeout: 900 }] }],
       },
     }, null, 2)}\n`);
   }
+
+  it('(j0) 补齐权限确认桥时复用自定义命令，重复安装不追加同类 hook', () => {
+    const cli = makeLiveCli();
+    const ask = portable(cli, 'hook claude-code');
+    writeSettingsWith(ask, portable(cli, 'session-ready'), portable(cli, 'user-prompt-hook'));
+    const legacy = JSON.parse(readFileSync(configPath, 'utf-8'));
+    delete legacy.hooks.PermissionRequest;
+    writeFileSync(configPath, `${JSON.stringify(legacy, null, 2)}\n`);
+    const options = {
+      configPath,
+      format: 'claude-settings' as const,
+      sessionStartCommand: CANON.ready,
+      userPromptSubmitCommand: CANON.prompt,
+    };
+    installHook('claude-code', options, CANON.ask);
+    const installed = readFileSync(configPath, 'utf-8');
+    const settings = JSON.parse(installed);
+    expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe(ask);
+    expect(settings.hooks.PermissionRequest).toEqual([
+      { hooks: [{ type: 'command', command: ask, timeout: 900 }] },
+    ]);
+    installHook('claude-code', options, CANON.ask);
+    expect(readFileSync(configPath, 'utf-8')).toBe(installed);
+  });
 
   it('(j) 手改过且仍然有效的 hook 被原样保留，一个字节都不动', () => {
     const cli = makeLiveCli();

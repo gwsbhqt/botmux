@@ -32,9 +32,9 @@ describe('签名引用 MR/Meego 变量时提示 agent 记录链接', () => {
   });
 
   it('非 injectsSessionContext CLI 的首轮路由提示同样带上', () => {
-    expect(buildBotmuxShellHints('zh', false, 'send', T).join('\n')).toContain('botmux dir set mr');
-    expect(buildBotmuxShellHints('en', false, 'transcript', T).join('\n')).toContain('botmux dir set meego');
-    expect(buildBotmuxShellHints('zh', true, 'send', T).join('\n')).not.toContain('botmux dir set');
+    expect(buildBotmuxShellHints('zh', false, 'send', undefined, T).join('\n')).toContain('botmux dir set mr');
+    expect(buildBotmuxShellHints('en', false, 'transcript', undefined, T).join('\n')).toContain('botmux dir set meego');
+    expect(buildBotmuxShellHints('zh', true, 'send', undefined, T).join('\n')).not.toContain('botmux dir set');
     expect(buildBotmuxShellHints('zh', false, 'send').join('\n')).not.toContain('botmux dir set');
   });
 });
