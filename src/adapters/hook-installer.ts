@@ -255,7 +255,7 @@ function findLiveCustomBotmuxHook(
   if (!canonicalSignature) return undefined;
   for (const group of groups) {
     if (!Array.isArray(group?.hooks)) continue;
-    const entry = group.hooks.find(e =>
+    const entry = group.hooks.find((e: ClaudeHookEntry) =>
       e?.type === 'command'
       && typeof e.command === 'string'
       && e.command !== canonicalCommand

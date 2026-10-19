@@ -6244,8 +6244,7 @@ async function cmdDir(argv: string[]): Promise<void> {
   const [sub, key, url] = pos;
   const base = resolve(explicitDir ?? process.cwd());
   const dir = readGitDirInfo(base)?.topLevel ?? base;
-  let session: ReturnType<typeof detectCurrentSession> = null;
-  try { session = detectCurrentSession(); } catch { /* 沙箱读不到 sessions：只影响页脚目录上报 */ }
+  const session = await detectCurrentSession();
 
   if (sub === 'use') {
     // 进入 worktree 开始干活时先登记，建 MR 之前页脚也显示正确的仓库与分支。
@@ -6282,7 +6281,7 @@ async function cmdDir(argv: string[]): Promise<void> {
 }
 
 /** 把页脚目录报给 daemon。失败只提示、不改退出码：链接已落盘，页脚只是暂时还读旧目录。 */
-async function reportFooterDir(dir: string, session: ReturnType<typeof detectCurrentSession>, loud = false): Promise<void> {
+async function reportFooterDir(dir: string, session: Awaited<ReturnType<typeof detectCurrentSession>>, loud = false): Promise<void> {
   const sid = session?.sessionId ?? findAncestorSessionId();
   if (!sid) return; // 会话外执行：没有页脚可更新
   if (session?.footerDir === dir) { if (loud) console.log(`✓ 页脚已是 ${dir}`); return; }
